@@ -1,0 +1,16 @@
+{
+  "name": "LaunchPilot",
+  "short_name": "LaunchPilot",
+  "description": "Measured launch command center for product builders.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "/launchpilot.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
