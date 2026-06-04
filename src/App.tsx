@@ -45,12 +45,24 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  RadarChart,
+  Radar as RechartsRadar,
+  RadialBar,
+  RadialBarChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
+  ZAxis,
 } from 'recharts'
 import { defaultWorkspace, normalizeWorkspace } from './data'
 import {
@@ -344,10 +356,87 @@ function getCoachRecommendations(workspace: WorkspaceState, readiness: ReturnTyp
   ]
 }
 
+function getLiveTelemetry(
+  workspace: WorkspaceState,
+  readiness: ReturnType<typeof calculateReadiness>,
+  now: Date,
+) {
+  const nowMs = now.getTime()
+  const parsedEvents = workspace.events
+    .map((event) => ({
+      ...event,
+      timeMs: new Date(event.timestamp).getTime(),
+    }))
+    .filter((event) => Number.isFinite(event.timeMs))
+  const latestEvent = parsedEvents.slice().sort((a, b) => b.timeMs - a.timeMs)[0]
+  const latestEventAge = latestEvent ? Math.max(0, Math.round((nowMs - latestEvent.timeMs) / 1000)) : null
+  const recentEvents = parsedEvents.filter((event) => nowMs - event.timeMs <= 5 * 60 * 1000).length
+  const freshnessScore =
+    latestEventAge === null ? 0 : Math.max(0, Math.min(100, 100 - Math.floor(latestEventAge / 3)))
+
+  const sourceMix = (['local', 'queued', 'novus-sent'] as ProductEvent['source'][]).map((source) => ({
+    name: source,
+    value: parsedEvents.filter((event) => event.source === source).length,
+  }))
+
+  const timeline = Array.from({ length: 8 }, (_, index) => {
+    const bucketStart = nowMs - (7 - index) * 60_000
+    const bucketEnd = bucketStart + 60_000
+    const events = parsedEvents.filter((event) => event.timeMs >= bucketStart && event.timeMs < bucketEnd)
+
+    return {
+      label: index === 7 ? 'Now' : `-${7 - index}m`,
+      events: events.length,
+      local: events.filter((event) => event.source === 'local').length,
+      queued: events.filter((event) => event.source === 'queued').length,
+      sent: events.filter((event) => event.source === 'novus-sent').length,
+    }
+  })
+
+  const dimensionData = [
+    { name: 'Features', value: readiness.featureCompletion, fill: '#0f766e' },
+    { name: 'Tasks', value: readiness.taskCompletion, fill: '#2563eb' },
+    { name: 'QA', value: readiness.qaCompletion, fill: '#7c3aed' },
+    { name: 'Launch', value: readiness.launchCompletion, fill: '#c2410c' },
+    { name: 'Evidence', value: readiness.evidenceCompletion, fill: '#16a34a' },
+    { name: 'Novus', value: readiness.integrationCompletion, fill: '#0891b2' },
+    { name: 'Assets', value: readiness.assetCompletion, fill: '#d97706' },
+    { name: 'Journey', value: readiness.journeyCompletion, fill: '#4f46e5' },
+  ]
+
+  const radarData = readiness.criteria.map((criterion) => ({
+    criterion: criterion.label.replace(' and ', ' + '),
+    score: criterion.score,
+    fullMark: 100,
+  }))
+
+  const featureScatter = workspace.features.map((feature) => ({
+    name: feature.title,
+    effort: feature.effort,
+    impact: feature.impact,
+    confidence: feature.confidence,
+    priority: priorityScore(feature),
+    status: feature.status,
+  }))
+
+  return {
+    latestEvent,
+    latestEventAge,
+    recentEvents,
+    freshnessScore,
+    sourceMix,
+    timeline,
+    dimensionData,
+    radarData,
+    featureScatter,
+  }
+}
+
 function CommandView({
   workspace,
   readiness,
   countdown,
+  now,
   setView,
   recordEvent,
   toggleTask,
@@ -356,6 +445,7 @@ function CommandView({
   workspace: WorkspaceState
   readiness: ReturnType<typeof calculateReadiness>
   countdown: ReturnType<typeof formatCountdown>
+  now: Date
   setView: (view: ViewKey) => void
   recordEvent: (eventName: string, detail: string, metadata?: Record<string, unknown>) => void
   toggleTask: (id: string) => void
@@ -364,6 +454,7 @@ function CommandView({
   const nextTasks = workspace.tasks.filter((task) => task.status !== 'done').slice(0, 4)
   const topRisks = workspace.risks.filter((risk) => !risk.resolved).slice(0, 3)
   const activePersona = workspace.personas.find((persona) => persona.id === workspace.activePersonaId)
+  const telemetry = getLiveTelemetry(workspace, readiness, now)
 
   return (
     <div className="view-stack">
@@ -438,6 +529,8 @@ function CommandView({
           progress={readiness.launchCompletion}
         />
       </section>
+
+      <LivePulsePanel telemetry={telemetry} readiness={readiness} />
 
       <CoachPanel
         workspace={workspace}
@@ -584,6 +677,69 @@ function DiagnosticCard({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  )
+}
+
+function LivePulsePanel({
+  telemetry,
+  readiness,
+}: {
+  telemetry: ReturnType<typeof getLiveTelemetry>
+  readiness: ReturnType<typeof calculateReadiness>
+}) {
+  return (
+    <section className="panel live-pulse-panel">
+      <div className="live-pulse-head">
+        <div>
+          <span className="eyebrow">Realtime pulse</span>
+          <h2>Live product signal</h2>
+          <p>
+            This panel is calculated from current workspace state and actual local event history.
+          </p>
+        </div>
+        <div className="live-status">
+          <span className={cn('live-dot', telemetry.freshnessScore < 20 && 'stale')} />
+          <strong>{telemetry.latestEventAge === null ? 'No events yet' : `${telemetry.latestEventAge}s ago`}</strong>
+          <small>Latest event</small>
+        </div>
+      </div>
+      <div className="live-pulse-grid">
+        <MetricCard
+          icon={Activity}
+          label="Event freshness"
+          value={`${telemetry.freshnessScore}%`}
+          detail={`${telemetry.recentEvents} event(s) in the last 5 minutes`}
+          progress={telemetry.freshnessScore}
+        />
+        <MetricCard
+          icon={PlugZap}
+          label="Integration health"
+          value={`${readiness.integrationCompletion}%`}
+          detail="Novus key, agent, queue, taxonomy, and screenshot checks"
+          progress={readiness.integrationCompletion}
+        />
+        <div className="mini-chart-panel">
+          <strong>Event timeline</strong>
+          <ResponsiveContainer width="100%" height={120}>
+            <LineChart data={telemetry.timeline}>
+              <XAxis dataKey="label" hide />
+              <YAxis allowDecimals={false} hide />
+              <Tooltip />
+              <Line type="monotone" dataKey="events" stroke="#2563eb" strokeWidth={3} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="source-mix">
+          <strong>Event source mix</strong>
+          {telemetry.sourceMix.map((source) => (
+            <div className="source-row" key={source.name}>
+              <span>{source.name}</span>
+              <b>{source.value}</b>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1126,6 +1282,7 @@ function AnalyticsView({
   toggleTaxonomy,
   diagnostics,
   integrationChecks,
+  now,
 }: {
   workspace: WorkspaceState
   readiness: ReturnType<typeof calculateReadiness>
@@ -1133,18 +1290,25 @@ function AnalyticsView({
   toggleTaxonomy: (id: string) => void
   diagnostics: ReturnType<typeof getNovusDiagnostics>
   integrationChecks: IntegrationCheck[]
+  now: Date
 }) {
+  const telemetry = getLiveTelemetry(workspace, readiness, now)
   const funnelData = [
-    { name: 'Opened', value: Math.max(12, workspace.events.length + 12) },
-    { name: 'Scored', value: Math.max(8, workspace.events.filter((event) => event.event.includes('criteria')).length + 8) },
-    { name: 'Built', value: Math.max(5, workspace.features.filter((feature) => feature.status === 'live').length) },
-    { name: 'Exported', value: Math.max(1, workspace.events.filter((event) => event.event === 'workspace_exported').length + 1) },
+    { name: 'Opened', value: workspace.events.filter((event) => event.event === 'workspace_opened').length },
+    { name: 'Scored', value: workspace.events.filter((event) => event.event === 'criteria_viewed').length },
+    {
+      name: 'Built',
+      value: workspace.events.filter((event) =>
+        ['feature_status_changed', 'task_advanced', 'journey_step_instrumented'].includes(event.event),
+      ).length,
+    },
+    {
+      name: 'Prepared',
+      value: workspace.events.filter((event) =>
+        ['submission_pack_copied', 'workspace_exported', 'launch_asset_status_changed'].includes(event.event),
+      ).length,
+    },
   ]
-  const adoptionData = Array.from({ length: 7 }, (_, index) => ({
-    day: `D${index + 1}`,
-    events: Math.max(2, Math.round((workspace.events.length + index * 3 + readiness.overall / 10) % 24) + 4),
-    readiness: Math.min(100, readiness.overall + index * 2),
-  }))
   const pieData = [
     { name: 'Strategy', value: workspace.features.filter((feature) => feature.category === 'Strategy').length },
     { name: 'Build', value: workspace.features.filter((feature) => feature.category === 'Build').length },
@@ -1277,6 +1441,71 @@ function AnalyticsView({
         </div>
       </section>
 
+      <section className="advanced-chart-grid">
+        <div className="panel">
+          <SectionTitle
+            eyebrow="Judge radar"
+            title="Criteria shape"
+            detail="A balanced shape is easier for judges to reward."
+          />
+          <div className="chart-box tall">
+            <ResponsiveContainer width="100%" height={310}>
+              <RadarChart data={telemetry.radarData}>
+                <PolarGrid />
+                <PolarAngleAxis dataKey="criterion" />
+                <PolarRadiusAxis angle={30} domain={[0, 100]} />
+                <RechartsRadar dataKey="score" stroke="#0f766e" fill="#0f766e" fillOpacity={0.22} />
+                <Tooltip />
+              </RadarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="panel">
+          <SectionTitle
+            eyebrow="Progress engine"
+            title="Readiness dimensions"
+            detail="Every ring is calculated from live workspace state."
+          />
+          <div className="chart-box tall">
+            <ResponsiveContainer width="100%" height={310}>
+              <RadialBarChart innerRadius="20%" outerRadius="96%" data={telemetry.dimensionData} startAngle={90} endAngle={-270}>
+                <RadialBar dataKey="value" background cornerRadius={7} />
+                <Tooltip />
+              </RadialBarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="dimension-legend">
+            {telemetry.dimensionData.map((dimension) => (
+              <span key={dimension.name}>
+                <i style={{ background: dimension.fill }} />
+                {dimension.name} {dimension.value}%
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <SectionTitle
+            eyebrow="Feature leverage"
+            title="Impact vs effort map"
+            detail="Upper-left features are the best launch bets."
+          />
+          <div className="chart-box tall">
+            <ResponsiveContainer width="100%" height={310}>
+              <ScatterChart>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" dataKey="effort" name="Effort" domain={[0, 10]} />
+                <YAxis type="number" dataKey="impact" name="Impact" domain={[0, 10]} />
+                <ZAxis type="number" dataKey="confidence" range={[70, 260]} />
+                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                <Scatter data={telemetry.featureScatter} fill="#2563eb" />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </section>
+
       <section className="chart-grid">
         <div className="panel">
           <SectionTitle
@@ -1299,13 +1528,13 @@ function AnalyticsView({
 
         <div className="panel">
           <SectionTitle
-            eyebrow="Trend"
-            title="Readiness and activity"
-            detail="Real product actions strengthen this signal."
+            eyebrow="Realtime"
+            title="Event timeline"
+            detail="Counts are from actual events in the last eight minutes."
           />
           <div className="chart-box">
             <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={adoptionData}>
+              <AreaChart data={telemetry.timeline}>
                 <defs>
                   <linearGradient id="activityGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#2563eb" stopOpacity={0.45} />
@@ -1313,11 +1542,12 @@ function AnalyticsView({
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="day" />
-                <YAxis />
+                <XAxis dataKey="label" />
+                <YAxis allowDecimals={false} />
                 <Tooltip />
-                <Area type="monotone" dataKey="events" stroke="#2563eb" fill="url(#activityGradient)" />
-                <Area type="monotone" dataKey="readiness" stroke="#d97706" fill="transparent" />
+                <Area type="monotone" dataKey="local" stackId="1" stroke="#2563eb" fill="url(#activityGradient)" />
+                <Area type="monotone" dataKey="queued" stackId="1" stroke="#d97706" fill="#fef3c7" />
+                <Area type="monotone" dataKey="sent" stackId="1" stroke="#0f766e" fill="#ccfbf1" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -2093,6 +2323,7 @@ function App() {
               workspace={workspace}
               readiness={readiness}
               countdown={countdown}
+              now={now}
               setView={setActiveView}
               recordEvent={recordEvent}
               toggleTask={toggleTask}
@@ -2128,6 +2359,7 @@ function App() {
               toggleTaxonomy={toggleTaxonomy}
               diagnostics={novusDiagnostics}
               integrationChecks={runtimeIntegrationChecks}
+              now={now}
             />
           )}
           {activeView === 'launch' && (
